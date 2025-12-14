@@ -6,12 +6,14 @@ import google.generativeai as genai
 from google.cloud import speech_v1p1beta1 as speech
 import base64
 from dotenv import load_dotenv
+from gtts import gTTS
+import tempfile
 
 # Load environment variables from .env file
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})  # Allow all origins for testing
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Configure Gemini API
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
@@ -40,14 +42,12 @@ model_options = [
     'gemini-1.0-pro'
 ]
 
-# Add available models to the front of the list
 if available_models:
     model_options = available_models[:3] + model_options
 
 for model_name in model_options:
     try:
         model = genai.GenerativeModel(model_name)
-        # Test the model
         test = model.generate_content("Hi")
         print(f"\n✅ Successfully using model: {model_name}\n")
         break
@@ -63,11 +63,9 @@ GOOGLE_APPLICATION_CREDENTIALS = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
 if not GOOGLE_APPLICATION_CREDENTIALS:
     raise ValueError("GOOGLE_APPLICATION_CREDENTIALS not found in environment variables")
 
-# Convert to absolute path if relative
 if not os.path.isabs(GOOGLE_APPLICATION_CREDENTIALS):
     GOOGLE_APPLICATION_CREDENTIALS = os.path.join(os.path.dirname(__file__), GOOGLE_APPLICATION_CREDENTIALS)
 
-# Verify the file exists
 if not os.path.exists(GOOGLE_APPLICATION_CREDENTIALS):
     raise FileNotFoundError(f"Google Cloud credentials file not found: {GOOGLE_APPLICATION_CREDENTIALS}")
 
@@ -76,28 +74,105 @@ os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = GOOGLE_APPLICATION_CREDENTIALS
 # Initialize Google Speech client
 speech_client = speech.SpeechClient()
 
-# Store conversation history (in production, use a database)
+def text_to_speech(text, language):
+    """Convert text to speech and return base64 encoded audio"""
+    try:
+        tts_lang_map = {
+            'english': 'en',
+            'hindi': 'hi',
+            'kannada': 'kn',
+            'tamil': 'ta',
+            'telugu': 'te',
+            'malayalam': 'ml',
+            'bengali': 'bn'
+        }
+        
+        lang_code = tts_lang_map.get(language, 'en')
+        
+        tts = gTTS(text=text, lang=lang_code, slow=False)
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as temp_audio:
+            tts.save(temp_audio.name)
+            temp_audio_path = temp_audio.name
+        
+        with open(temp_audio_path, 'rb') as audio_file:
+            audio_data = audio_file.read()
+            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+        
+        os.unlink(temp_audio_path)
+        
+        return audio_base64
+        
+    except Exception as e:
+        print(f"TTS Error: {e}")
+        return None
+
+# Store conversation history
 conversations = {}
 
 class ConversationManager:
-    def __init__(self, topic, lesson_content):
+    def __init__(self, topic, lesson_content, language='english'):
         self.topic = topic
         self.lesson_content = lesson_content
+        self.language = language.lower()
         self.history = []
         self.turn_count = 0
         self.max_turns = 10
         
     def get_system_prompt(self):
-        return f"""You are a language learning companion helping a student practice what they've learned.
+        language_configs = {
+            'english': {
+                'name': 'English',
+                'instruction': 'Respond in English',
+                'aspects': 'pronunciation, grammar, and vocabulary'
+            },
+            'hindi': {
+                'name': 'Hindi (हिंदी)',
+                'instruction': 'Respond in Hindi (Devanagari script). Use simple, conversational Hindi that a learner would understand.',
+                'aspects': 'pronunciation (उच्चारण), grammar (व्याकरण), and vocabulary (शब्दावली)'
+            },
+            'kannada': {
+                'name': 'Kannada (ಕನ್ನಡ)',
+                'instruction': 'Respond in Kannada (Kannada script). Use simple, conversational Kannada that a learner would understand.',
+                'aspects': 'pronunciation (ಉಚ್ಚಾರಣೆ), grammar (ವ್ಯಾಕರಣ), and vocabulary (ಶಬ್ದಕೋಶ)'
+            },
+            'tamil': {
+                'name': 'Tamil (தமிழ்)',
+                'instruction': 'Respond in Tamil (Tamil script). Use simple, conversational Tamil that a learner would understand.',
+                'aspects': 'pronunciation (உச்சரிப்பு), grammar (இலக்கணம்), and vocabulary (சொல்வளம்)'
+            },
+            'telugu': {
+                'name': 'Telugu (తెలుగు)',
+                'instruction': 'Respond in Telugu (Telugu script). Use simple, conversational Telugu that a learner would understand.',
+                'aspects': 'pronunciation (ఉచ్చారణ), grammar (వ్యాకరణం), and vocabulary (పదకోశం)'
+            },
+            'malayalam': {
+                'name': 'Malayalam (മലയാളം)',
+                'instruction': 'Respond in Malayalam (Malayalam script). Use simple, conversational Malayalam that a learner would understand.',
+                'aspects': 'pronunciation (ഉച്ചാരണം), grammar (വ്യാകരണം), and vocabulary (പദസമ്പത്ത്)'
+            },
+            'bengali': {
+                'name': 'Bengali (বাংলা)',
+                'instruction': 'Respond in Bengali (Bengali script). Use simple, conversational Bengali that a learner would understand.',
+                'aspects': 'pronunciation (উচ্চারণ), grammar (ব্যাকরণ), and vocabulary (শব্দভাণ্ডার)'
+            }
+        }
+        
+        config = language_configs.get(self.language, language_configs['english'])
+        
+        return f"""You are a {config['name']} language learning companion helping a student practice what they've learned.
 
 Topic: {self.topic}
 Lesson Content: {self.lesson_content}
+Language: {config['name']}
+
+IMPORTANT: {config['instruction']}
 
 Your role:
-1. Have a natural conversation with the student about the topic
+1. Have a natural conversation with the student about the topic IN {config['name'].upper()}
 2. Ask questions to assess their understanding
 3. Correct mistakes gently and provide better alternatives
-4. Track pronunciation, grammar, and vocabulary usage
+4. Track {config['aspects']} usage
 5. After {self.max_turns} exchanges, provide a final score and detailed feedback
 
 Conversation guidelines:
@@ -105,6 +180,7 @@ Conversation guidelines:
 - Ask follow-up questions to assess understanding
 - Note any grammatical errors or pronunciation issues
 - Be supportive and constructive
+- Use simple, clear language appropriate for a learner
 
 Current turn: {self.turn_count}/{self.max_turns}
 
@@ -113,17 +189,17 @@ If this is the final turn, provide a JSON response with:
     "final_assessment": true,
     "score": <number out of 100>,
     "stars": <number 1-5>,
-    "message": "<encouraging message>",
-    "what_you_did_well": "<specific praise>",
+    "message": "<encouraging message IN {config['name'].upper()}>",
+    "what_you_did_well": "<specific praise IN {config['name'].upper()}>",
     "improvement_tip": {{
         "what_they_said": "<exact problematic phrase>",
-        "better_way": "<corrected phrase>",
-        "explanation": "<why this is better>"
+        "better_way": "<corrected phrase IN {config['name'].upper()}>",
+        "explanation": "<why this is better IN {config['name'].upper()}>"
     }},
-    "detailed_feedback": "<comprehensive feedback on grammar, pronunciation, vocabulary>"
+    "detailed_feedback": "<comprehensive feedback IN {config['name'].upper()}>"
 }}
 
-Otherwise, respond naturally to continue the conversation."""
+Otherwise, respond naturally IN {config['name'].upper()} to continue the conversation."""
 
     def add_message(self, role, content):
         self.history.append({"role": role, "content": content})
@@ -133,22 +209,18 @@ Otherwise, respond naturally to continue the conversation."""
     def get_response(self, user_message):
         self.add_message("user", user_message)
         
-        # Build conversation context
         context = self.get_system_prompt() + "\n\nConversation history:\n"
         for msg in self.history:
             context += f"{msg['role']}: {msg['content']}\n"
         
-        # Get response from Gemini
         response = model.generate_content(context)
         assistant_message = response.text.strip()
         
         self.add_message("assistant", assistant_message)
         
-        # Check if this is the final assessment
         is_final = self.turn_count >= self.max_turns
         
         if is_final:
-            # Request final assessment in structured format
             assessment_prompt = f"""Based on this conversation, provide a final assessment as ONLY valid JSON (no markdown, no backticks, no preamble):
 
 Conversation:
@@ -171,22 +243,18 @@ Return ONLY this JSON structure, nothing else:
                 assessment_response = model.generate_content(assessment_prompt)
                 assessment_text = assessment_response.text.strip()
                 
-                # Remove markdown code blocks if present
                 assessment_text = assessment_text.replace('```json', '').replace('```', '').strip()
                 
-                # Find JSON object
                 if '{' in assessment_text and '}' in assessment_text:
                     json_start = assessment_text.index('{')
                     json_end = assessment_text.rindex('}') + 1
                     json_str = assessment_text[json_start:json_end]
                     assessment = json.loads(json_str)
                     
-                    # Validate required fields
                     required_fields = ['score', 'stars', 'message', 'what_you_did_well', 'improvement_tip']
                     if all(field in assessment for field in required_fields):
                         return {"is_final": True, "assessment": assessment}
                 
-                # Fallback assessment if parsing fails
                 assessment = {
                     "score": 85,
                     "stars": 4,
@@ -202,7 +270,6 @@ Return ONLY this JSON structure, nothing else:
                 
             except Exception as e:
                 print(f"Error generating assessment: {e}")
-                # Fallback assessment
                 assessment = {
                     "score": 80,
                     "stars": 4,
@@ -227,16 +294,19 @@ def start_session():
         session_id = data.get('session_id')
         topic = data.get('topic', 'Ordering at a Café')
         lesson_content = data.get('lesson_content', 'Basic café ordering phrases and polite requests')
+        language = data.get('language', 'english')
         
-        conversations[session_id] = ConversationManager(topic, lesson_content)
+        conversations[session_id] = ConversationManager(topic, lesson_content, language)
         
-        # Get initial greeting
         initial_response = conversations[session_id].get_response("Hello, I'm ready to practice!")
+        
+        audio_base64 = text_to_speech(initial_response['message'], language)
         
         return jsonify({
             'status': 'success',
             'session_id': session_id,
-            'initial_message': initial_response['message']
+            'initial_message': initial_response['message'],
+            'audio': audio_base64
         })
     except Exception as e:
         print(f"Error in start_session: {e}")
@@ -254,12 +324,25 @@ def transcribe_audio():
     try:
         data = request.json
         audio_content = base64.b64decode(data['audio'])
+        language = data.get('language', 'english')
+        
+        language_map = {
+            'english': 'en-US',
+            'hindi': 'hi-IN',
+            'kannada': 'kn-IN',
+            'tamil': 'ta-IN',
+            'telugu': 'te-IN',
+            'malayalam': 'ml-IN',
+            'bengali': 'bn-IN'
+        }
+        
+        language_code = language_map.get(language.lower(), 'en-US')
         
         audio = speech.RecognitionAudio(content=audio_content)
         config = speech.RecognitionConfig(
             encoding=speech.RecognitionConfig.AudioEncoding.WEBM_OPUS,
             sample_rate_hertz=48000,
-            language_code='en-US',
+            language_code=language_code,
             enable_automatic_punctuation=True,
             model='latest_long'
         )
@@ -279,6 +362,9 @@ def transcribe_audio():
         })
         
     except Exception as e:
+        print(f"Transcription error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)})
 
 
@@ -296,14 +382,22 @@ def send_message():
         conversation = conversations[session_id]
         response = conversation.get_response(user_message)
         
+        audio_base64 = None
+        if not response['is_final']:
+            audio_base64 = text_to_speech(response['message'], conversation.language)
+        
         return jsonify({
             'status': 'success',
             'response': response,
+            'audio': audio_base64,
             'turn_count': conversation.turn_count,
             'max_turns': conversation.max_turns
         })
         
     except Exception as e:
+        print(f"Error in send_message: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)})
 
 
@@ -594,6 +688,19 @@ def test_interface():
         <h1>🗣️ Language Practice</h1>
         <p class="topic">Topic: <span id="topicName">Ordering at a Café</span></p>
         
+        <div style="margin-bottom: 20px;">
+            <label style="display: block; margin-bottom: 8px; color: #666; font-weight: 600;">Select Language:</label>
+            <select id="languageSelect" style="width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 10px; font-size: 14px; background: white; cursor: pointer;">
+                <option value="english">English</option>
+                <option value="hindi">Hindi (हिंदी)</option>
+                <option value="kannada">Kannada (ಕನ್ನಡ)</option>
+                <option value="tamil">Tamil (தமிழ்)</option>
+                <option value="telugu">Telugu (తెలుగు)</option>
+                <option value="malayalam">Malayalam (മലയാളം)</option>
+                <option value="bengali">Bengali (বাংলা)</option>
+            </select>
+        </div>
+        
         <div class="progress-bar">
             <div class="progress" id="progressBar"></div>
         </div>
@@ -619,9 +726,31 @@ def test_interface():
         let mediaRecorder = null;
         let audioChunks = [];
         let isRecording = false;
+        let currentLanguage = 'english';
 
         async function startSession() {
             sessionId = 'session_' + Date.now();
+            currentLanguage = document.getElementById('languageSelect').value;
+            
+            const topics = {
+                'english': 'Ordering at a Café',
+                'hindi': 'कैफे में ऑर्डर करना',
+                'kannada': 'ಕೆಫೆಯಲ್ಲಿ ಆರ್ಡರ್ ಮಾಡುವುದು',
+                'tamil': 'ஒரு கஃபேயில் ஆர்டர் செய்தல்',
+                'telugu': 'కేఫ్‌లో ఆర్డర్ చేయడం',
+                'malayalam': 'ഒരു കഫേയിൽ ഓർഡർ ചെയ്യുക',
+                'bengali': 'ক্যাফেতে অর্ডার করা'
+            };
+            
+            const lessonContent = {
+                'english': 'Basic café ordering phrases, polite requests, and common vocabulary',
+                'hindi': 'कैफे में ऑर्डर करने के बुनियादी वाक्यांश, विनम्र अनुरोध, और सामान्य शब्दावली',
+                'kannada': 'ಕೆಫೆಯಲ್ಲಿ ಆರ್ಡರ್ ಮಾಡಲು ಮೂಲಭೂತ ನುಡಿಗಟ್ಟುಗಳು, ವಿನಯಶೀಲ ವಿನಂತಿಗಳು ಮತ್ತು ಸಾಮಾನ್ಯ ಶಬ್ದಕೋಶ',
+                'tamil': 'அடிப்படை கஃபே ஆர்டரிங் சொற்றொடர்கள், கண்ணியமான கோரிக்கைகள் மற்றும் பொதுவான சொற்களஞ்சியம்',
+                'telugu': 'ప్రాథమిక కేఫ్ ఆర్డరింగ్ పదబంధాలు, మర్యాదపూర్వక అభ్యర్థనలు మరియు సాధారణ పదజాలం',
+                'malayalam': 'അടിസ്ഥാന കഫേ ഓർഡറിംഗ് വാക്യങ്ങൾ, മര്യാദയുള്ള അഭ്യർത്ഥനകൾ, സാധാരണ പദാവലി',
+                'bengali': 'মৌলিক ক্যাফে অর্ডারিং বাক্যাংশ, ভদ্র অনুরোধ এবং সাধারণ শব্দভাণ্ডার'
+            };
             
             try {
                 updateStatus('Starting session...');
@@ -630,8 +759,9 @@ def test_interface():
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         session_id: sessionId,
-                        topic: 'Ordering at a Café',
-                        lesson_content: 'Basic café ordering phrases, polite requests, and common vocabulary'
+                        topic: topics[currentLanguage],
+                        lesson_content: lessonContent[currentLanguage],
+                        language: currentLanguage
                     })
                 });
                 
@@ -650,10 +780,17 @@ def test_interface():
                 
                 if (data.status === 'success') {
                     document.getElementById('startBtn').style.display = 'none';
+                    document.getElementById('languageSelect').disabled = true;
                     document.getElementById('chatContainer').style.display = 'block';
                     document.getElementById('controls').style.display = 'flex';
                     
                     addMessage('bot', data.initial_message);
+                    
+                    // Play audio response
+                    if (data.audio) {
+                        playAudio(data.audio);
+                    }
+                    
                     updateStatus('Session started! Click the microphone or type your response.');
                 } else {
                     updateStatus('Error: ' + (data.message || 'Unknown error'));
@@ -722,7 +859,10 @@ def test_interface():
                     const response = await fetch(`${API_URL}/transcribe_audio`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ audio: base64Audio })
+                        body: JSON.stringify({ 
+                            audio: base64Audio,
+                            language: currentLanguage
+                        })
                     });
                     
                     const data = await response.json();
@@ -773,6 +913,12 @@ def test_interface():
                         displayFinalAssessment(data.response.assessment);
                     } else {
                         addMessage('bot', data.response.message);
+                        
+                        // Play audio response
+                        if (data.audio) {
+                            playAudio(data.audio);
+                        }
+                        
                         updateStatus(`Turn ${data.turn_count}/${data.max_turns} - Keep going!`);
                     }
                 }
@@ -834,6 +980,17 @@ def test_interface():
             document.getElementById('status').textContent = message;
         }
 
+        function playAudio(audioBase64) {
+            try {
+                const audio = new Audio('data:audio/mp3;base64,' + audioBase64);
+                audio.play().catch(err => {
+                    console.error('Error playing audio:', err);
+                });
+            } catch (error) {
+                console.error('Error creating audio:', error);
+            }
+        }
+
         document.getElementById('textInput')?.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') {
                 sendTextMessage();
@@ -867,8 +1024,3 @@ def health_check():
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
-
-
-
-
-

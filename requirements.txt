@@ -1,5 +1,8 @@
 flask
 flask-cors
 google-generativeai
-google-cloud-speech
 python-dotenv
+torch
+torchaudio
+transformers
+gtts
